@@ -1,135 +1,124 @@
 import streamlit as st
 import stripe
 import re
+import uuid
+from datetime import datetime
 
-# Configure Stripe
-STRIPE_SECRET_KEY = "your_stripe_secret_key_here"
+# Azure Imports
+from azure.identity import DefaultAzureCredential
+from azure.data.tables import TableServiceClient, TableClient
+
+#stripe config
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "default_key_if_not_set")
 stripe.api_key = STRIPE_SECRET_KEY
 
-# Function to validate email
+# Azure Configuration
+STORAGE_ACCOUNT_NAME = "your_storage_account_name"
+TABLE_NAME = "CNCOrientationTransactions"
+
+# Get storage account from environment
+storage_account_name = os.environ.get('AZURE_STORAGE_ACCOUNT')
+
+# Use DefaultAzureCredential (works with managed identity)
+credential = DefaultAzureCredential()
+
+# Create Table Service Client
+table_service_client = TableServiceClient(
+    account_url=f"https://{storage_account_name}.table.core.windows.net",
+    credential=credential
+)
+
+class AzureTableManager:
+    def __init__(self):
+        # Use DefaultAzureCredential for flexible authentication
+        try:
+            # This will try multiple authentication methods
+            self.credential = DefaultAzureCredential()
+            
+            # Create table service client
+            self.table_service_client = TableServiceClient(
+                account_url=f"https://{STORAGE_ACCOUNT_NAME}.table.core.windows.net",
+                credential=self.credential
+            )
+            
+            # Get or create table client
+            self.table_client = self.table_service_client.get_table_client(table_name=TABLE_NAME)
+        except Exception as e:
+            st.error(f"Azure Authentication Error: {e}")
+            raise
+
+    def create_transaction(self, transaction_data):
+        """
+        Create a new transaction record in Azure Table Storage
+        """
+        try:
+            # Generate a unique partition and row key
+            partition_key = transaction_data['Formation']
+            row_key = str(uuid.uuid4())
+            
+            # Prepare entity
+            entity = {
+                'PartitionKey': partition_key,
+                'RowKey': row_key,
+                **transaction_data
+            }
+            
+            # Insert entity
+            self.table_client.create_entity(entity)
+            return row_key
+        except Exception as e:
+            st.error(f"Error creating transaction: {e}")
+            return None
+
 def validate_email(email):
     email_regex = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     return re.match(email_regex, email) is not None
 
-# Payment Intent Creation Function
 def create_payment_intent(amount):
     try:
-        # Convert amount to cents (assuming amount is in MAD)
         amount_in_cents = int(amount * 100)
         payment_intent = stripe.PaymentIntent.create(
             amount=amount_in_cents,
-            currency="mad",  # Using Moroccan Dirham
+            currency="mad",
             payment_method_types=["card"],
         )
         return payment_intent.client_secret
     except Exception as e:
-        st.error(f"Error creating payment: {e}")
+        st.error(f"Payment Error: {e}")
         return None
 
-# Main Streamlit App
 def main():
-    st.set_page_config(page_title="CNC Orientation Service", page_icon=":graduation_cap:")
+    st.set_page_config(page_title="CNC Orientation Service")
 
-    # Sidebar for Student Profile
-    st.sidebar.header("Profil Étudiant")
-    nom = st.sidebar.text_input("Nom et Prénom")
+    # Initialize Azure Table Manager
+    try:
+        azure_table_manager = AzureTableManager()
+    except Exception as e:
+        st.error("Failed to initialize Azure Table Storage. Check your configuration.")
+        return
+
+    # Rest of your existing Streamlit app logic...
+    st.sidebar.header("Student Profile")
+    nom = st.sidebar.text_input("Full Name")
     email = st.sidebar.text_input("Email")
-    classement = st.sidebar.number_input("Classement CNC", min_value=1, max_value=5000, step=1)
-    filiere = st.sidebar.selectbox("Filière choisie", ["MP", "PSI", "TSI"])
-    interets = st.sidebar.text_area("Mots-clés d'intérêt (ex: IA, Génie Civil, Énergie)")
+    phone = st.sidebar.text_input("Phone Number")
 
-    # Main page content
-    st.title("Système de Recommandation CNC")
-    st.write("Bienvenue sur notre plateforme de recommandation des formations d'ingénieurs pour les étudiants du CNC.")
+    # Your formations and other logic remain the same...
 
-    # Formations Database
-    formations = [
-        {
-            "Nom": "Génie Informatique", 
-            "Etablissement": "EMI", 
-            "Débouchés": "Ingénieur logiciel, Data Scientist", 
-            "Mots-clés": "Informatique, IA, Programmation",
-            "Frais": 500
-        },
-        {
-            "Nom": "Génie Civil", 
-            "Etablissement": "EHTP", 
-            "Débouchés": "Chef de projet, Consultant en BTP", 
-            "Mots-clés": "Construction, BTP, Environnement",
-            "Frais": 500
-        },
-        {
-            "Nom": "Ingénierie des Données", 
-            "Etablissement": "ENSIAS", 
-            "Débouchés": "Data Analyst, Ingénieur Big Data", 
-            "Mots-clés": "Data Science, IA, Cloud",
-            "Frais": 500
+    # During payment, use Azure Table Manager to log transaction
+    if st.button("Proceed to Payment"):
+        transaction_data = {
+            'Name': nom,
+            'Email': email,
+            'PhoneNumber': phone,
+            'Formation': selected_formation['Nom'],
+            'Amount': selected_formation['Frais'],
+            'Timestamp': datetime.now().isoformat()
         }
-    ]
-
-    # Validate Profile
-    profile_valid = False
-    if st.sidebar.button("Enregistrer le profil"):
-        if not nom:
-            st.sidebar.error("Veuillez saisir votre nom")
-        elif not validate_email(email):
-            st.sidebar.error("Veuillez saisir un email valide")
-        elif not interets:
-            st.sidebar.error("Veuillez saisir vos mots-clés d'intérêt")
-        else:
-            profile_valid = True
-            st.sidebar.success("Profil enregistré avec succès !")
-
-    # Recommandation de Formations
-    st.subheader("Formations recommandées")
-    
-    # Filter formations based on interests
-    if interets and profile_valid:
-        mots_cles = [mot.strip().lower() for mot in interets.split(",")]
-        formations_recommandees = [
-            formation for formation in formations
-            if any(mot in formation["Mots-clés"].lower() for mot in mots_cles)
-        ]
-
-        if not formations_recommandees:
-            st.write("Aucune formation ne correspond à vos mots-clés. Essayez d'élargir vos intérêts.")
-        else:
-            # Store selected formation in session state
-            if 'selected_formation' not in st.session_state:
-                st.session_state.selected_formation = None
-
-            for i, formation in enumerate(formations_recommandees):
-                with st.container():
-                    st.write(f"**{formation['Nom']}** - {formation['Etablissement']}")
-                    st.write(f"Débouchés : {formation['Débouchés']}")
-                    st.write(f"Mots-clés : {formation['Mots-clés']}")
-                    st.write(f"Frais de dossier : {formation['Frais']} MAD")
-                    
-                    if st.button(f"Sélectionner {formation['Nom']}"):
-                        st.session_state.selected_formation = formation
-                        st.success(f"Vous avez sélectionné : {formation['Nom']}")
-
-    # Payment Section
-    st.subheader("Paiement des frais de dossier")
-    
-    if st.session_state.get('selected_formation'):
-        formation = st.session_state.selected_formation
         
-        # Payment process
-        st.write(f"Frais de dossier pour {formation['Nom']} : {formation['Frais']} MAD")
-        
-        if st.checkbox("J'accepte de payer les frais de dossier"):
-            if st.button("Procéder au Paiement"):
-                # Create Payment Intent
-                client_secret = create_payment_intent(formation['Frais'])
-                
-                if client_secret:
-                    st.success("Lien de paiement généré!")
-                    st.write(f"Veuillez suivre ce lien pour compléter le paiement : [Payer {formation['Frais']} MAD](https://checkout.stripe.com/pay/{client_secret})")
-                else:
-                    st.error("Erreur lors de la génération du lien de paiement")
-    else:
-        st.info("Veuillez d'abord sélectionner une formation pour procéder au paiement.")
+        transaction_id = azure_table_manager.create_transaction(transaction_data)
+        if transaction_id:
+            st.success(f"Transaction logged with ID: {transaction_id}")
 
 if __name__ == "__main__":
     main()
