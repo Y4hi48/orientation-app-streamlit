@@ -1,124 +1,112 @@
 import streamlit as st
-import stripe
+import sqlite3
 import re
-import uuid
-from datetime import datetime
 
-# Azure Imports
-from azure.identity import DefaultAzureCredential
-from azure.data.tables import TableServiceClient, TableClient
+# Formations Database with expanded options
+FORMATIONS = {
+    "Data": {"name": "Data Science", "etablissement": "ENSIAS", "frais": 500},
+    "Electric": {"name": "Génie Électrique", "etablissement": "ENIM", "frais": 500},
+    "Mechanique": {"name": "Génie Mécanique", "etablissement": "ENSAM", "frais": 500},
+    "AI": {"name": "Intelligence Artificielle", "etablissement": "EMI", "frais": 500},
+    "Industriel": {"name": "Génie Industriel", "etablissement": "EHTP", "frais": 500}
+}
 
-#stripe config
-STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "default_key_if_not_set")
-stripe.api_key = STRIPE_SECRET_KEY
+# Initialize SQLite Database
+def init_db():
+    conn = sqlite3.connect('students.db')
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS registrations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nom TEXT,
+            email TEXT,
+            filiere TEXT,
+            formation TEXT,
+            status TEXT DEFAULT 'Pending'
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-# Azure Configuration
-STORAGE_ACCOUNT_NAME = "your_storage_account_name"
-TABLE_NAME = "CNCOrientationTransactions"
-
-# Get storage account from environment
-storage_account_name = os.environ.get('AZURE_STORAGE_ACCOUNT')
-
-# Use DefaultAzureCredential (works with managed identity)
-credential = DefaultAzureCredential()
-
-# Create Table Service Client
-table_service_client = TableServiceClient(
-    account_url=f"https://{storage_account_name}.table.core.windows.net",
-    credential=credential
-)
-
-class AzureTableManager:
-    def __init__(self):
-        # Use DefaultAzureCredential for flexible authentication
-        try:
-            # This will try multiple authentication methods
-            self.credential = DefaultAzureCredential()
-            
-            # Create table service client
-            self.table_service_client = TableServiceClient(
-                account_url=f"https://{STORAGE_ACCOUNT_NAME}.table.core.windows.net",
-                credential=self.credential
-            )
-            
-            # Get or create table client
-            self.table_client = self.table_service_client.get_table_client(table_name=TABLE_NAME)
-        except Exception as e:
-            st.error(f"Azure Authentication Error: {e}")
-            raise
-
-    def create_transaction(self, transaction_data):
-        """
-        Create a new transaction record in Azure Table Storage
-        """
-        try:
-            # Generate a unique partition and row key
-            partition_key = transaction_data['Formation']
-            row_key = str(uuid.uuid4())
-            
-            # Prepare entity
-            entity = {
-                'PartitionKey': partition_key,
-                'RowKey': row_key,
-                **transaction_data
-            }
-            
-            # Insert entity
-            self.table_client.create_entity(entity)
-            return row_key
-        except Exception as e:
-            st.error(f"Error creating transaction: {e}")
-            return None
-
+# Validate email function
 def validate_email(email):
     email_regex = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     return re.match(email_regex, email) is not None
 
-def create_payment_intent(amount):
-    try:
-        amount_in_cents = int(amount * 100)
-        payment_intent = stripe.PaymentIntent.create(
-            amount=amount_in_cents,
-            currency="mad",
-            payment_method_types=["card"],
-        )
-        return payment_intent.client_secret
-    except Exception as e:
-        st.error(f"Payment Error: {e}")
-        return None
+# Save registration to database
+def save_registration(nom, email, filiere, formation):
+    conn = sqlite3.connect('students.db')
+    c = conn.cursor()
+    c.execute('''
+        INSERT INTO registrations 
+        (nom, email, filiere, formation) 
+        VALUES (?, ?, ?, ?)
+    ''', (nom, email, filiere, formation))
+    conn.commit()
+    conn.close()
 
 def main():
-    st.set_page_config(page_title="CNC Orientation Service")
+    # Initialize database
+    init_db()
 
-    # Initialize Azure Table Manager
-    try:
-        azure_table_manager = AzureTableManager()
-    except Exception as e:
-        st.error("Failed to initialize Azure Table Storage. Check your configuration.")
-        return
+    # Streamlit page configuration
+    st.set_page_config(page_title="CNC Orientation Service", page_icon=":graduation_cap:")
 
-    # Rest of your existing Streamlit app logic...
-    st.sidebar.header("Student Profile")
-    nom = st.sidebar.text_input("Full Name")
+    # Sidebar for Student Profile
+    st.sidebar.header("Profil Étudiant")
+    nom = st.sidebar.text_input("Nom et Prénom")
     email = st.sidebar.text_input("Email")
-    phone = st.sidebar.text_input("Phone Number")
+    filiere = st.sidebar.selectbox("Filière CNC", ["MP", "PSI", "TSI"])
 
-    # Your formations and other logic remain the same...
+    # Main page content
+    st.title("Système de Recommandation CNC")
+    st.write("Bienvenue sur notre plateforme de recommandation des formations d'ingénieurs.")
 
-    # During payment, use Azure Table Manager to log transaction
-    if st.button("Proceed to Payment"):
-        transaction_data = {
-            'Name': nom,
-            'Email': email,
-            'PhoneNumber': phone,
-            'Formation': selected_formation['Nom'],
-            'Amount': selected_formation['Frais'],
-            'Timestamp': datetime.now().isoformat()
-        }
-        
-        transaction_id = azure_table_manager.create_transaction(transaction_data)
-        if transaction_id:
-            st.success(f"Transaction logged with ID: {transaction_id}")
+    # Formation Selection
+    st.subheader("Sélection de Formation")
+    formation_choisie = st.selectbox(
+        "Choisissez votre formation", 
+        list(FORMATIONS.keys())
+    )
+
+    # Display formation details
+    if formation_choisie:
+        formation_details = FORMATIONS[formation_choisie]
+        st.write(f"**Formation:** {formation_details['name']}")
+        st.write(f"**Établissement:** {formation_details['etablissement']}")
+        st.write(f"**Frais de dossier:** {formation_details['frais']} MAD")
+
+    # Validate Profile and Proceed to Payment
+    if st.button("Procéder au Paiement"):
+        if not nom:
+            st.error("Veuillez saisir votre nom")
+        elif not validate_email(email):
+            st.error("Veuillez saisir un email valide")
+        else:
+            # Save registration details
+            save_registration(nom, email, filiere, formation_details['name'])
+            
+            # Redirect to Stripe payment
+            st.markdown(
+                f"""
+                <a href="https://buy.stripe.com/test_9AQeXcdxsfFr5P2dQQ" 
+                   target="_blank" 
+                   style="display: inline-block; padding: 10px 20px; 
+                          background-color: #4CAF50; color: white; 
+                          text-decoration: none; border-radius: 5px;">
+                    Payer {formation_details['frais']} MAD
+                </a>
+                """, 
+                unsafe_allow_html=True
+            )
+            st.info("Après le paiement, votre inscription sera confirmée.")
+
+    # Optional: View Registrations (Admin Feature)
+    if st.checkbox("Voir les inscriptions (Admin)"):
+        conn = sqlite3.connect('students.db')
+        df = pd.read_sql_query("SELECT * FROM registrations", conn)
+        st.dataframe(df)
+        conn.close()
 
 if __name__ == "__main__":
     main()
