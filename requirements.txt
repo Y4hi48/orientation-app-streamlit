@@ -1,0 +1,5 @@
+streamlit
+stripe
+azure-data-tables
+azure-identity
+python-dotenv
